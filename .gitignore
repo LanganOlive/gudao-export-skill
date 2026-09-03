@@ -1,0 +1,15 @@
+# Runtime state (never committed)
+data/
+*.csv
+last_run.json
+room_id_map.json
+dbg_incr.log
+dbg_cron_wrapper.log
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
+*~
