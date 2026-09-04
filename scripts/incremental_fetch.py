@@ -21,10 +21,16 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 CSV_DATE_SUFFIX = re.compile(r'^(.*?)_(\d{8})-(\d{8})\.csv$')
+
+# Stale-room marker: prefix a room's CSV with 【空】 if its newest message is
+# older than STALE_DAYS. Mirrors the existing convention for empty rooms
+# (latest_message_id=0) — both signal "no active data here".
+EMPTY_PREFIX = '【空】'
+STALE_DAYS = 7
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_DIR = Path(os.environ.get('GUDAO_WORK_DIR', _SCRIPT_DIR))
@@ -141,12 +147,16 @@ def _rename_basename(csv_path: Path, new_basename: str) -> Path:
     Used when a room's name (or tag-derived style) changes: the historical
     CSV must be re-anchored to the new basename so future prepends land on it.
     Returns the final Path. Skips if target already exists (no clobber).
+    Preserves the 【空】 prefix if the source file has it.
     """
     m = CSV_DATE_SUFFIX.match(csv_path.name)
     if not m:
         return csv_path
-    _, start, end = m.group(1), m.group(2), m.group(3)
+    prefix_part, start, end = m.group(1), m.group(2), m.group(3)
+    has_empty = prefix_part.startswith(EMPTY_PREFIX)
     new_name = f'{new_basename}_{start}-{end}.csv'
+    if has_empty:
+        new_name = EMPTY_PREFIX + new_name
     new_path = csv_path.parent / new_name
     if new_path == csv_path:
         return csv_path
@@ -155,6 +165,37 @@ def _rename_basename(csv_path: Path, new_basename: str) -> Path:
         return csv_path
     csv_path.rename(new_path)
     return new_path
+
+
+def _apply_stale_prefix(csv_path: Path) -> Path:
+    """Sync the 【空】 prefix on a CSV with its current staleness.
+
+    - If the file's end-date is older than STALE_DAYS, ensure it has 【空】.
+    - If the end-date is fresh (newer data arrived), strip 【空】.
+    Skips if the target path already exists.
+    """
+    if not csv_path.exists():
+        return csv_path
+    m = CSV_DATE_SUFFIX.match(csv_path.name)
+    if not m:
+        return csv_path
+    end_dt = datetime.strptime(m.group(3), '%Y%m%d').date()
+    is_stale = (date.today() - end_dt).days >= STALE_DAYS
+    has_prefix = csv_path.name.startswith(EMPTY_PREFIX)
+    if is_stale and not has_prefix:
+        new_path = csv_path.parent / (EMPTY_PREFIX + csv_path.name)
+        if new_path.exists():
+            return csv_path
+        csv_path.rename(new_path)
+        return new_path
+    if not is_stale and has_prefix:
+        new_name = csv_path.name[len(EMPTY_PREFIX):]
+        new_path = csv_path.parent / new_name
+        if new_path.exists():
+            return csv_path
+        csv_path.rename(new_path)
+        return new_path
+    return csv_path
 
 
 def csv_path_for_room(room: dict, id_map: dict) -> Path:
@@ -186,16 +227,19 @@ def csv_path_for_room(room: dict, id_map: dict) -> Path:
     name_based = f'{name}_{style}'
 
     def _glob_for(basename: str) -> list[Path]:
+        # Match the room's CSV whether or not it carries the 【空】 stale prefix.
+        # Both `{basename}_*.csv` and `【空】{basename}_*.csv` are valid.
         return [
             f for f in sorted(OUT_DIR.glob(f'{basename}_*-*.csv'))
-            if not f.name.startswith('【空】')
+        ] + [
+            f for f in sorted(OUT_DIR.glob(f'{EMPTY_PREFIX}{basename}_*-*.csv'))
         ]
 
     # 1. Direct hit on current note-or-name based basename
     matches = _glob_for(full_clean)
     if matches:
         id_map[rid] = full_clean
-        return matches[0]
+        return _apply_stale_prefix(matches[0])
 
     # 2. id_map historical (room renamed or note changed since last run)
     historical = id_map.get(rid)
@@ -206,7 +250,7 @@ def csv_path_for_room(room: dict, id_map: dict) -> Path:
             new_path = _rename_basename(csv_path, full_clean)
             log(f'  room renamed: {historical} -> {full_clean} ({csv_path.name} -> {new_path.name})')
             id_map[rid] = full_clean
-            return new_path
+            return _apply_stale_prefix(new_path)
 
     # 3. Raw name-based fallback (legacy CSV from before note-based naming)
     #    Uses loose glob `{name}_*-*.csv` because legacy CSVs may have been
@@ -215,17 +259,18 @@ def csv_path_for_room(room: dict, id_map: dict) -> Path:
     #    would miss these.
     #    Only triggers when current is note-based AND id_map is empty for this id.
     if note and name_based != full_clean and rid not in id_map:
-        loose_glob = list(OUT_DIR.glob(f'{name}_*-*.csv'))
+        loose_glob = list(OUT_DIR.glob(f'{name}_*-*.csv')) + \
+                     list(OUT_DIR.glob(f'{EMPTY_PREFIX}{name}_*-*.csv'))
         loose_matches = [
             f for f in sorted(loose_glob)
-            if not f.name.startswith('【空】') and f.name.startswith(f'{name}_')
+            if f.name.startswith(f'{name}_') or f.name.startswith(f'{EMPTY_PREFIX}{name}_')
         ]
         if loose_matches:
             csv_path = loose_matches[0]
             new_path = _rename_basename(csv_path, full_clean)
             log(f'  legacy rename (name->note): {csv_path.name} -> {new_path.name}')
             id_map[rid] = full_clean
-            return new_path
+            return _apply_stale_prefix(new_path)
 
     # 4. Brand new CSV
     today = datetime.now().strftime('%Y%m%d')

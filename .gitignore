@@ -6,6 +6,11 @@ room_id_map.json
 dbg_incr.log
 dbg_cron_wrapper.log
 
+# Python build artifacts
+__pycache__/
+*.pyc
+*.pyo
+
 # Editor / OS
 .vscode/
 .DS_Store

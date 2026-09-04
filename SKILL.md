@@ -69,6 +69,23 @@ reference deployment (Windows + PowerShell + bb-browser on PATH).
 
 A typical 294-room pass takes ~7–10 minutes on the reference machine.
 
+### Output naming
+
+CSV files in `data/` follow `{name}_{style}_{YYYYMMDD}-{YYYYMMDD}.csv`
+(newest message date on the right). Two prefix conventions:
+
+- **No prefix** — room has been active within the last `STALE_DAYS` days
+  (default 7) OR is brand new.
+- **`【空】`** prefix — room has had no new messages for `STALE_DAYS` or more.
+  Same convention used by the original incremental script for empty rooms
+  (`latest_message_id == 0`).
+
+`incremental_fetch.py`'s `csv_path_for_room` calls `_apply_stale_prefix` on
+every resolved path, so the prefix tracks current staleness automatically:
+when a stale room comes back to life the `【空】` is stripped on its next
+fetch; when an active room goes quiet for `STALE_DAYS+` the next fetch
+adds the prefix.
+
 ## Failure modes & recovery
 
 - **Exit 1 (`chunk N rc=1`)** — bb-browser eval timed out → Chrome render
